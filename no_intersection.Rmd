@@ -1,0 +1,653 @@
+---
+title: "trying_no_intersection_code"
+output: pdf_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup}
+
+options(scipen=999)
+
+#install.packages("sf", configure.args = "--with-gdal-config=C:/gdal-filegdb/bin/gdal-config")
+#install.packages("rgdal")
+#install.packages("rgdal")
+#library("terra")
+library(raster)
+library(sp)
+#library("rgdal")
+
+library("sf")
+library("spaMM")
+library("readxl")
+library("ggplot2")
+library("Rmisc")
+library("pivottabler")
+require("SciViews")
+require("spdep")
+require("dplyr")
+require("xlsx")
+require("labelVector")
+require("foreign")
+require("optimx")
+require("tidyverse")
+require("sjPlot")
+require("rgdal")
+require("tidyr")
+require("reghelper")
+require("stringr")
+
+# checkong the GDAL version
+sf::sf_extSoftVersion()
+
+# listing the GDAL drivers
+sf::st_drivers()
+```
+
+##################################################### Instructions
+#####################################################
+
+
+'
+Step 1: Intersect crop shapefile with census tract shapefile
+Step 3: Export Step 1 as txt file and read it "crop.category.tract"
+Step 4: Need to make sure the number of crop grown has not changed (80 landuses inlcuding some that were exlcuded)
+Step 5: Need to make sure the number of pesticides applied has not changed (48 at the time of analysis)
+'
+
+
+##################################################### County name
+#####################################################
+
+
+```{r}
+#emily
+setwd('C:\\Users\\emily\\OneDrive - Washington State University (email.wsu.edu)\\cpts475-project')
+
+# county FIPS code
+
+#FIPS <- read_excel("P:/Ofer Amram/WA DOH/Pesticide/Data/geographic_codes.xls", sheet = "County")
+
+# emily edited this so hopefully will read from my folder
+# county names and codes
+FIPS <- read.csv("OREGON/OR_geographic_codes.csv")
+
+# gave up on this part, so used the csv above.
+#FIPS <- read_excel("OREGON/OR_geographic_codes.xls", sheet = "County")
+#file.exists("OREGON/OR_geographic_codes.xlsx")  # Should return TRUE if the path is correct
+#FIPS <- read_excel("OREGON/OR_geographic_codes.xlsx")
+
+FIPS$COUNTY_FIPS_CODE <- as.numeric(FIPS$COUNTYFP)
+FIPS <- subset(FIPS, select = c(COUNTY_NAME, COUNTYFPL, COUNTY_FIPS_CODE ))
+FIPS
+
+```
+
+##################################################### Census tract area for adjusting pesticide application
+#####################################################
+
+
+# county FIPS code
+
+```{r}
+#ct_area <- sf::st_read("C:/Users/solmaz.amiri/Documents/Washington State University/Ofer Amram/DOH/Pesticide19_CT2020.gdb", layer = "CT_2020")
+
+# emily/sarah edit
+# tract20 file for washington. Downloaded from https://www.atsdr.cdc.gov/place-health/php/svi/svi-data-documentation-download.html#cdc_generic_section_4-documentation 
+
+#st_layers("SVI2022_OREGON_censustract.gdb")
+
+ct_area <- sf::st_read("SVI2022_OREGON_censustract.gdb", layer = "SVI2022_OREGON_tract")
+
+#converts the object to a data frame, since we are removing the spatial component
+sf::st_geometry(ct_area) <- NULL
+
+#colnames(ct_area)
+# replaced ID2 and AREA columns with FIPS and AREA_SQMI because there was neither ID2 and AREA
+ct_area <- subset(ct_area, select = c(FIPS, AREA_SQMI))
+
+```
+
+
+
+
+##################################################### Crop categories
+#####################################################
+
+
+# read crop category spreadsheet
+```{r}
+# ours
+crop.category <- read.csv("OREGON/OR_Crops.csv")
+
+crop.category <- subset(crop.category, select = c(Class_Name, Category))
+```
+
+# this was our vectoized layer. It seems that the only columns from this are the geometry, which we end up taking out, and the DN, which is the color of the pixel. The pixel color should correspond to the crop
+```{r}
+gpkg_info <- st_read("OR_CROPS_vector.gpkg", layer = "OR_CROPS_vector", query = "SELECT * FROM OR_CROPS_vector LIMIT 5")
+gpkg_info
+gpkg_info <- st_read("intersection.gpkg", layer = "intersection", query = "SELECT * FROM intersection LIMIT 1")
+colnames(gpkg_info)
+```
+
+##################################################### Crop data
+#####################################################
+
+# read the intersection of the census tract and the crop. This is not really possible to create in R, since the crop data when downloaded is in raster format. We used the open source QGis to make this. It takes a lot of memory(~20gb) and time (6 hrs) on my (emily) personal computer.
+# shout out to Annie Kintner, she is the our consulting GIS expert and we could not have done this without her.
+```{r}
+#memory.limit(size = 19000) 
+crop.category.tract <- sf::st_read("intersection.gpkg", layer = "intersection", geometry = "NULL", query = "SELECT DN, OBJECTID, ST, STATE, COUNTY, FIPS, AREA_SQMI, E_POV150, M_POV150, E_UNEMP, M_UNEMP, E_NOHSDP, M_NOHSDP, E_AGE65, M_AGE65, E_AGE17, M_AGE17, E_DISABL, M_DISABL, E_SNGPNT, M_SNGPNT, E_HISP, M_HISP, E_LIMENG, M_LIMENG, Shape_Area FROM intersection")
+#st_geometry(crop.category.tract) <- NULL
+```
+```{r}
+crop.category.tract
+```
+
+
+# county FIPS
+# replaced crop.category.tract$ID_1 with FIPS.
+```{r}
+crop.category.tract$county.FIPS <- substr(crop.category.tract$FIPS, 1, 5)
+```
+
+# join with crop category and drop exclude and soybeans
+
+```{r}
+#grab the DN to crop
+pixels <- read.csv("crop_pixels.csv", header = TRUE, sep = ",")
+crop.category.tract <- left_join(crop.category.tract, pixels, by = "DN")
+crop.category.tract <- left_join(crop.category.tract, crop.category, by = "Class_Name")
+
+crop.category.tract <- subset(crop.category.tract, Category != "exclude" & Category != "soybeans")
+
+str(crop.category.tract)
+
+#this number is wayyyyyyyy too big
+sum(crop.category.tract$Shape_Area)
+
+```
+```{r}
+crop.category.tract.test <- crop.category.tract
+```
+
+# area excluded (this does nothing once replaced with AREA_SQMI)
+```{r}
+crop.category.tract <- subset(crop.category.tract, AREA_SQMI >= 50)
+#sum(crop.category.tract.exclude$Shape_Area)
+summary(crop.category.tract)
+```
+
+
+# remove areas <= 18000 m2
+# crop.category.tract1 <- subset(crop.category.tract, area_m2 > 18000)
+
+# not remove based on <= 18000 m2, replaced with AREA_SQMI
+  
+```{r}
+crop.category.tract1 <- crop.category.tract
+
+
+crop.category.tract1 %>%
+  group_by(Category) %>% 
+  summarise(AREA_SQMI = sum(Shape_Area))
+
+```
+  
+
+
+##################################################### Crop area by county
+#####################################################
+
+
+# summarize crop area by county
+# replaced with AREA_SQMI
+```{r}
+crop_area_county <- crop.category.tract1 %>%
+  group_by(county.FIPS,Category) %>% 
+  summarise(AREA_SQMI = sum(Shape_Area))
+
+
+crop_area_county.flat <- crop.category.tract1 %>%
+  group_by(county.FIPS) %>% 
+  summarise(AREA_SQMI = sum(Shape_Area)) #AREA_SQMI
+
+sum(crop_area_county$AREA_SQMI)
+sum(crop_area_county.flat$AREA_SQMI)
+```
+
+
+# convert from long to wide
+```{r}
+crop_area_county1 <- spread(crop_area_county, key = Category, value = AREA_SQMI)
+
+crop_area_county1[is.na(crop_area_county1)] <- 0
+```
+
+
+##################################################### State and county pesticide data - High estimates used
+#####################################################
+
+
+# pesticide by crop state
+
+```{r}
+#HighEstimate_AgPestUsebyCropGroup <- sf::st_read("P:/Ofer Amram/WA DOH/Pesticide/Data/Cropland.gdb", layer = "HighEstimate_AgPestUsebyCropGroup92to19") 
+
+# ours
+HighEstimate_AgPestUsebyCropGroup <- read.csv("OREGON/EP_HighEstimate_OR.csv", header = TRUE, sep = ",")
+
+#we already seperated this by hand
+#HighEstimate_AgPestUsebyCropGroup <- subset(HighEstimate_AgPestUsebyCropGroup, State_FIPS_code == 53 & Year == 2019)
+
+HighEstimate_AgPestUsebyCropGroup <- subset(HighEstimate_AgPestUsebyCropGroup, select = c(State_FIPS_code, Year,Compound, Corn, Wheat, Vegetables_and_fruit, Orchards_and_grapes, Alfalfa, Pasture_and_hay, Other_crops))
+HighEstimate_AgPestUsebyCropGroup[is.na(HighEstimate_AgPestUsebyCropGroup)] <- 0
+HighEstimate_AgPestUsebyCropGroup
+```
+
+
+
+# pesticide use in Or
+```{r}
+estimate.2019 <- subset(HighEstimate_AgPestUsebyCropGroup, State_FIPS_code == 41 & Year == 2019)
+estimate.2019 <- subset(estimate.2019, select = c(Compound, Corn, Wheat, Vegetables_and_fruit, Orchards_and_grapes, Alfalfa, Pasture_and_hay, Other_crops))
+str(estimate.2019)
+summary(estimate.2019)
+#unsure why she had 6:15 here since she doesnt even select that many columns to use.
+cols = c(1:ncol(estimate.2019))
+cols
+
+estimate.2019[,cols] = apply(estimate.2019[,cols], 2, function(x) as.numeric(as.character(x)));
+
+estimate.2019$all <- rowSums(estimate.2019[ , 1:ncol(estimate.2019)], na.rm = T)
+sum(estimate.2019$all)
+#HighEstimate_AgPestUsebyCropGroup
+```
+
+
+
+# pesticide use in 2019
+
+```{r}
+#estimate.2019 <- subset(HighEstimate_AgPestUsebyCropGroup, Year == 2019)
+
+#str(estimate.2019)
+#cols = c(6:15);    
+#estimate.2019[,cols] = apply(estimate.2019[,cols], 2, function(x) as.numeric(as.character(x)));
+
+#estimate.2019$all <- rowSums(estimate.2019[ , 6:15], na.rm = T)
+#sum(estimate.2019$all)
+
+#estimate.2019.state <- estimate.2019 %>%
+#  group_by(State_FIPS_code) %>% 
+#  summarise(sum = sum(all)) #AREA_SQMI
+
+#estimate.2019.state <- estimate.2019 %>%
+#  group_by(Compound) %>% 
+#  summarise(n = n()) 
+
+#estimate.2019.state <- estimate.2019 %>%
+#  group_by(State) %>% 
+#  summarise(n = n()) 
+```
+
+
+
+
+# pesticide use in 2011
+#estimate.2011 <- subset(HighEstimate_AgPestUsebyCropGroup, Year == 1992)
+
+#str(estimate.2011)
+#cols = c(6:15);    
+#estimate.2011[,cols] = apply(estimate.2011[,cols], 2, function(x) as.numeric(as.character(x)));
+
+#estimate.2011$all <- rowSums(estimate.2011[ , 6:15], na.rm = T)
+#sum(estimate.2011$all)
+
+#estimate.2011.state <- estimate.2011 %>%
+#  group_by(State_FIPS_code) %>% 
+#  summarise(sum = sum(all)) #AREA_SQMI
+#"
+
+
+
+# % pesticide applied to each crop category
+
+
+```{r}
+
+HighEstimate_AgPestUsebyCropGroup$Corn <- as.numeric(HighEstimate_AgPestUsebyCropGroup$Corn)  # corn is numeric
+
+HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)] <- lapply(HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)], as.numeric)  # change columns to numeric
+
+HighEstimate_AgPestUsebyCropGroup$Corn1 <- as.numeric(ifelse(HighEstimate_AgPestUsebyCropGroup$Corn == 0, 0, 
+                                                             HighEstimate_AgPestUsebyCropGroup$Corn / rowSums(HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)], na.rm = TRUE)))
+
+
+HighEstimate_AgPestUsebyCropGroup$Corn1 <-  as.numeric(ifelse(HighEstimate_AgPestUsebyCropGroup$Corn == 0, 0 , 
+                                              format(HighEstimate_AgPestUsebyCropGroup$Corn / rowSums(HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)]), scientific = FALSE)))
+
+
+HighEstimate_AgPestUsebyCropGroup$Wheat1 <-  as.numeric(ifelse(HighEstimate_AgPestUsebyCropGroup$Wheat == 0, 0 , 
+                                                   format(HighEstimate_AgPestUsebyCropGroup$Wheat / rowSums(HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)]), scientific = FALSE)))
+
+
+HighEstimate_AgPestUsebyCropGroup$Vegetables_and_fruit1 <-  as.numeric(ifelse(HighEstimate_AgPestUsebyCropGroup$Vegetables_and_fruit == 0, 0 , 
+                                                    format(HighEstimate_AgPestUsebyCropGroup$Vegetables_and_fruit / rowSums(HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)]), scientific = FALSE)))
+
+
+HighEstimate_AgPestUsebyCropGroup$Orchards_and_grapes1 <-  as.numeric(ifelse(HighEstimate_AgPestUsebyCropGroup$Orchards_and_grapes == 0, 0 , 
+                                                                   format(HighEstimate_AgPestUsebyCropGroup$Orchards_and_grapes / rowSums(HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)]), scientific = FALSE)))
+
+
+HighEstimate_AgPestUsebyCropGroup$Alfalfa1 <-  as.numeric(ifelse(HighEstimate_AgPestUsebyCropGroup$Alfalfa == 0, 0 , 
+                                                                  format(HighEstimate_AgPestUsebyCropGroup$Alfalfa / rowSums(HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)]), scientific = FALSE)))
+
+
+HighEstimate_AgPestUsebyCropGroup$Pasture_and_hay1 <-  as.numeric(ifelse(HighEstimate_AgPestUsebyCropGroup$Pasture_and_hay == 0, 0 , 
+                                                      format(HighEstimate_AgPestUsebyCropGroup$Pasture_and_hay / rowSums(HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)]), scientific = FALSE)))
+
+
+HighEstimate_AgPestUsebyCropGroup$Other_crops1 <-  as.numeric(ifelse(HighEstimate_AgPestUsebyCropGroup$Other_crops == 0, 0 , 
+                                                              format(HighEstimate_AgPestUsebyCropGroup$Other_crops / rowSums(HighEstimate_AgPestUsebyCropGroup[,4:ncol(HighEstimate_AgPestUsebyCropGroup)]), scientific = FALSE)))
+
+
+
+HighEstimate_AgPestUsebyCropGroup <- subset(HighEstimate_AgPestUsebyCropGroup, select = c(Compound, Corn1, Wheat1, Vegetables_and_fruit1, Orchards_and_grapes1, Alfalfa1, Pasture_and_hay1, Other_crops1))
+
+
+```
+
+
+
+# pesticide data by county
+
+```{r}
+#EPest_county_estimates <- sf::st_read("P:/Ofer Amram/WA DOH/Pesticide/Data/Cropland.gdb", layer = "EPest_county_estimates_2019")
+EPest_county_estimates <- read.csv("OREGON/OR_EPest_county_estimates_2019.csv", header = TRUE, sep = ",")
+#EPest_county_estimates <- subset(EPest_county_estimates, STATE_FIPS_CODE == 53 )
+
+
+EPest_county_estimates1 <- subset(EPest_county_estimates, select = c(COMPOUND, COUNTY_FIPS_CODE,EPEST_HIGH_KG ))
+
+EPest_county_estimates1 <- left_join(FIPS, EPest_county_estimates1, by = "COUNTY_FIPS_CODE")
+
+
+EPest_county_estimates2 <- EPest_county_estimates1 %>%
+  group_by(COUNTY_FIPS_CODE) %>% 
+  summarise(pesticide = sum(EPEST_HIGH_KG))
+HighEstimate_AgPestUsebyCropGroup
+```
+
+
+
+##################################################### County calculation
+#####################################################
+
+
+# join state with county to calculate
+```{r}
+#EPest_county_estimates1$COMPOUND <- as.numeric(EPest_county_estimates1$COMPOUND) #this should not be numeric
+
+state.county <- left_join(EPest_county_estimates1, HighEstimate_AgPestUsebyCropGroup, by = c("COMPOUND" = "Compound"))
+```
+
+
+# join state compound by county compound
+
+```{r}
+crop_area_county1$county.FIPS <-as.numeric(crop_area_county1$county.FIPS)
+data <- left_join(crop_area_county1, state.county, by = c("county.FIPS" = "COUNTYFPL"))
+```
+
+
+
+# compound m2 crop
+
+```{r}
+data$alfalfa.perm2 <- ifelse( data$alfalfa == 0, 0 , format(data$Alfalfa1 * data$EPEST_HIGH_KG / data$alfalfa , scientific = FALSE))
+
+data$corn.perm2 <- ifelse( data$corn == 0, 0 , format(data$Corn1 * data$EPEST_HIGH_KG/ data$corn, scientific = FALSE))
+
+data$othercrops.perm2 <- ifelse( data$othercrops == 0, 0 , format(data$Other_crops1 * data$EPEST_HIGH_KG/ data$othercrops, scientific = FALSE))
+
+data$orchardsandgrapes.perm2 <- ifelse( data$orchardsandgrapes == 0, 0 , format(data$Orchards_and_grapes1 * data$EPEST_HIGH_KG / data$orchardsandgrapes, scientific = FALSE))
+
+data$pastureandhay.perm2 <- ifelse( data$pastureandhay == 0, 0 , format(data$Pasture_and_hay1 * data$EPEST_HIGH_KG/ data$pastureandhay, scientific = FALSE))
+
+data$vegetablesandfruit.perm2 <- ifelse( data$vegetablesandfruit == 0, 0 , format(data$Vegetables_and_fruit1 * data$EPEST_HIGH_KG/ data$vegetablesandfruit, scientific = FALSE))
+
+data$wheat.perm2 <- ifelse( data$wheat == 0, 0 ,format(data$Wheat1 * data$EPEST_HIGH_KG/ data$wheat, scientific = FALSE))
+```
+
+
+
+# final selection
+
+```{r}
+data.county <- subset(data, select = c(county.FIPS, COUNTY_NAME, COMPOUND, alfalfa.perm2, corn.perm2, othercrops.perm2, orchardsandgrapes.perm2, pastureandhay.perm2, vegetablesandfruit.perm2, wheat.perm2))
+colnames(data.county) <- gsub(".perm2", "", colnames(data.county))
+```
+
+
+# from wide to long format & create unique ID
+
+```{r}
+data.county1 <- gather(data.county, Category, perm2, alfalfa:wheat, factor_key = TRUE)
+data.county1$county.FIPS.Category <- paste(data.county1$county.FIPS, data.county1$Category, "")
+```
+
+
+
+##################################################### Census tract calculation
+#####################################################
+
+
+# create unique ID (i am not sure this is creating a unique ID)
+```{r}
+crop.category.tract1$county.FIPS.Category <- paste(crop.category.tract1$county.FIPS, crop.category.tract1$Category, "")
+summary(crop.category.tract1)
+small_crop<-head(crop.category.tract1,1)
+small_data<-head(data.county1,1)
+summary(data.county1)
+
+```
+```{r}
+crop.category.tract2 <- left_join(small_crop, small_data, by = "county.FIPS.Category" )
+crop.category.tract2
+```
+
+
+
+
+# join with county pesticide data
+
+```{r}
+colnames(data.county1)
+
+colnames(crop.category.tract1)
+```
+
+```{r}
+crop.category.tract2 <- left_join(crop.category.tract1, data.county1, by = "county.FIPS.Category" )
+
+```
+
+
+
+# check of any row didn't make it to the join >>> 0 is good
+```{r}
+crop.category.tract2.notjoined <- anti_join(crop.category.tract1, data.county1, by = "county.FIPS.Category" )
+crop.category.tract2.notjoined 
+```
+
+
+
+# pesticide 
+
+```{r}
+crop.category.tract2$pesticide <- as.numeric(crop.category.tract2$Shape_Area)*as.numeric(crop.category.tract2$perm2)
+
+pesticide.tract <- crop.category.tract2 %>%
+  group_by(FIPS) %>% 
+  summarise(pesticide = format(sum(pesticide), scientific = FALSE))
+
+
+pesticide.county <- crop.category.tract2 %>%
+  group_by(county.FIPS.x) %>% #COMPOUND
+  summarise(pesticidewsu = format(sum(pesticide), scientific = FALSE))
+
+pesticide.county$COUNTY_FIPS_CODE <- as.numeric(str_sub(pesticide.county$county.FIPS.x,start = -2))
+```
+
+
+
+# WSU calculated pesticide vs reported pesticide - double checking numbers
+
+```{r}
+sum(as.numeric(pesticide.tract$pesticide), na.rm = T)
+sum(as.numeric(pesticide.county$pesticidewsu))
+
+sum(state.county$EPEST_HIGH_KG)
+sum(EPest_county_estimates$EPEST_HIGH_KG)
+```
+
+
+
+# difference --- pesticide application data includes pesticides applied to wheat in Mason, Kitsap and Wahkiakum counties but no wheat is grown in these counties
+# difference is 465 kg of pesticide or 0.01% of pesticide applied to WA --- no further adjustments make to correct for this
+#This is probably note relevant for oregon.
+
+```{r}
+
+county.difference <- left_join(pesticide.county, EPest_county_estimates2, by = "COUNTY_FIPS_CODE")
+county.difference$pesticide.diff <- format(county.difference$pesticide - as.numeric(county.difference$pesticidewsu), scientific = FALSE)
+
+
+str(pesticide.county)
+str(EPest_county_estimates2)
+```
+
+
+
+# Final file with unit conversion from kg to lbs & adjustment based on CT area & create percentile
+
+```{r}
+pesticide.tract$ID_1 <- as.numeric(pesticide.tract$FIPS )
+
+#changed ID2 to FIPS due to lack of ID2 column
+pesticide.tract <- left_join(ct_area, pesticide.tract, by = c("FIPS" = "FIPS"))
+
+
+pesticide.tract$pesticide_lbs <- as.numeric(pesticide.tract$pesticide) * 2.2046226218
+pesticide.tract$pesticide_lbs_mile2 <- pesticide.tract$pesticide_lbs / pesticide.tract$AREA
+
+#changed ID2 to FIPS due to lack of ID2 column
+pesticide.tract <- subset(pesticide.tract, select = c(FIPS, pesticide_lbs, pesticide_lbs_mile2))
+pesticide.tract[is.na(pesticide.tract)] <- 0
+
+
+pesticide.tract$pesticide_lbs_mile2_percentile <- ntile(pesticide.tract$pesticide_lbs_mile2, 10)
+
+write.csv(pesticide.tract, "Final.csv")
+```
+
+
+##################################################### 
+#####################################################
+#####################################################
+#####################################################
+#####################################################
+#####################################################
+#####################################################
+##################################################### Include pesticides that are harmful
+
+
+# read pesticide inclusion file
+```{r}
+#excel_sheets("OREGON/OR_Crops.xlsx")
+#Hazardous_pesticide <- read_excel("OREGON/OR_Crops.xlsx", sheet = "Hazardous Pesticide")
+Hazardous_pesticide <- read.csv("OREGON/hazardpest.csv")
+
+
+Hazardous_pesticide <- subset(Hazardous_pesticide, select = c(COMPOUND, Include))
+```
+
+
+
+
+# shapefile with selected pesticides
+```{r}
+crop.category.tract3 <- left_join(Hazardous_pesticide, crop.category.tract2, by ="COMPOUND")
+
+```
+```{r}
+crop.category.tract3
+```
+
+```{r}
+crop.category.tract3$perm2 = as.numeric(crop.category.tract3$perm2)
+crop.category.tract3$pesticide = as.numeric(crop.category.tract3$pesticide)
+crop.category.tract3 <- crop.category.tract3 %>%
+  group_by(COUNTY,ST, E_POV150, FIPS, M_POV150, E_UNEMP, M_UNEMP, E_NOHSDP, M_NOHSDP, E_AGE65, M_AGE65, E_AGE17, M_AGE17, E_DISABL, M_DISABL, E_SNGPNT, M_SNGPNT, E_HISP, M_HISP, E_LIMENG, M_LIMENG) %>%
+  mutate(
+    perm2 = sum(perm2, na.rm = TRUE),       
+    pesticide = sum(pesticide, na.rm = TRUE)) %>%
+      select(COUNTY, ST, E_POV150, FIPS, M_POV150, E_UNEMP, M_UNEMP, E_NOHSDP, M_NOHSDP, E_AGE65, M_AGE65, E_AGE17, M_AGE17, E_DISABL, M_DISABL, E_SNGPNT, M_SNGPNT, E_HISP, M_HISP, E_LIMENG, M_LIMENG, pesticide, perm2, -Class_Name, -DN, -Category.x, -county.FIPS.Category) %>%
+  distinct()
+
+```
+
+
+# our state plots
+
+```{r}
+crop.category.tract3 <- crop.category.tract3 %>%
+  mutate(county = tolower(gsub(" County", "", COUNTY)))
+crop.category.tract3
+```
+
+
+
+```{r}
+oregon_map <- map_data("county") %>%
+  filter(region == "oregon")%>%
+  left_join(crop.category.tract3, by = c("subregion" = "county"))
+```
+```{r}
+oregon_map
+```
+
+
+```{r}
+plot <- ggplot(data = oregon_map, aes(long, lat, group = group, fill = M_POV150)) +
+  geom_polygon(color = "black", linewidth = 0.2) +
+  coord_fixed(1.3) +
+  scale_fill_viridis_c(name = "M_POV150", option = "viridis", na.value = "gray90") +
+  theme_minimal() +
+  labs(title = "Poverty Distribution in Oregon",
+       subtitle = "Shaded by M_POV150")
+plot
+```
+```{r}
+plot <- ggplot(data = oregon_map, aes(long, lat, group = group, fill = pesticide)) +
+  geom_polygon(color = "black", linewidth = 0.2) +
+  coord_fixed(1.3) +
+  scale_fill_viridis_c(name = "Pesticide Usage", option = "viridis", na.value = "gray90") +
+  theme_minimal() +
+  labs(title = "Pesticide Distribution in Oregon",
+       subtitle = "")
+plot
+```
+```{r}
+plot <- ggplot(data = oregon_map, aes(long, lat, group = group, fill = M_UNEMP)) +
+  geom_polygon(color = "black", linewidth = 0.2) +
+  coord_fixed(1.3) +
+  scale_fill_viridis_c(name = "Unemployment", option = "viridis", na.value = "gray90") +
+  theme_minimal() +
+  labs(title = "Unemployment Distribution in Oregon",
+       subtitle = "Shaded by M_UNEMP")
+plot
+```
+
+
